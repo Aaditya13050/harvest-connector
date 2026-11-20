@@ -1,0 +1,27 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "harvest-connector",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-11-01",
+  // nodejs_compat: Node built-ins used by the MCP SDK.
+  // global_fetch_strictly_public: required by the OAuth library before it will accept
+  // Client ID Metadata Documents (the sign-in method ChatGPT prefers); it stops outbound
+  // fetches from being routed to other Workers on the same zone.
+  "compatibility_flags": ["nodejs_compat", "global_fetch_strictly_public"],
+  "kv_namespaces": [
+    {
+      // Stores OAuth clients, grants and tokens (tokens only as hashes; Harvest
+      // credentials encrypted). Create it with: npx wrangler kv namespace create OAUTH_KV
+      "binding": "OAUTH_KV",
+      "id": "3b2941c6d3774c358547c47ffb887418"
+    }
+  ],
+  // SUPPORT_EMAIL (shown on the privacy page and sent to Harvest in the User-Agent header) is
+  // kept out of this file. Set it once with: npx wrangler secret put SUPPORT_EMAIL
+  "vars": {
+    // Optional: the public URL clients use, e.g. https://harvest.yourdomain.com.
+    // Leave empty to use whatever URL the request arrived on.
+    "PUBLIC_BASE_URL": ""
+  },
+  "observability": { "enabled": true }
+}

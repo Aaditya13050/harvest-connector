@@ -188,6 +188,9 @@ async function main(): Promise<void> {
     check(consent.html.includes('127.0.0.1'), 'page shows where access will be sent');
     check(consent.html.includes('Access will go to an app on this computer'), 'page warns about a local redirect');
     check(consent.res.headers.get('content-security-policy')?.includes("frame-ancestors 'none'"), 'page cannot be framed');
+    const nonce = consent.res.headers.get('content-security-policy')?.match(/'nonce-([a-f0-9]+)'/)?.[1];
+    check(Boolean(nonce) && consent.html.includes(`<script nonce="${nonce}">`), "only the page's own one-time script may run");
+    check(consent.html.includes('Connecting\\u2026'), 'the page shows progress and ignores a second click');
     check(Boolean(consent.handle) && Boolean(consent.cookie), 'page carries a one-time handle bound to a cookie');
 
     const wrong = await submitConsent(consent, { decision: 'approve', token: 'not-a-real-token', scope: 'harvest:write' });
@@ -209,7 +212,12 @@ async function main(): Promise<void> {
     check(code.length > 10, 'an authorization code is issued');
 
     const replay = await submitConsent(consent, { decision: 'approve', token: FAKE_TOKEN, account_id: '424242' });
+    const replayHtml = await replay.text();
     check(replay.status === 400, 'the consent handle cannot be reused', replay.status);
+    check(replayHtml.includes('This connect page has expired'), 'a used or expired page says so clearly');
+
+    const lostCookie = await submitConsent({ ...consent, cookie: '' }, { decision: 'approve', token: FAKE_TOKEN, account_id: '424242' });
+    check(lostCookie.status === 400 && (await lostCookie.text()).includes('click <strong>Connect</strong> again'), 'a page whose cookie lapsed asks to start again');
 
     step('Token exchange');
     const badPkce = await exchangeCode(app.client_id, code, 'wrong-verifier-wrong-verifier-wrong-verifier-12345');
@@ -308,7 +316,12 @@ async function main(): Promise<void> {
   } finally {
     stopWorker(worker);
     await harvest.close();
-    rmSync(stateDir, { recursive: true, force: true });
+    // Windows can keep the local runtime's files locked for a moment after it stops.
+    try {
+      rmSync(stateDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 500 });
+    } catch {
+      console.log(`  · could not remove ${stateDir} (still in use); it's a temp folder, safe to delete later`);
+    }
   }
 
   console.log(`\n${passes} passed, ${failures} failed`);

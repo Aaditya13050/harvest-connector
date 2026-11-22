@@ -50,6 +50,7 @@ export function htmlPage(title: string, body: string, options: { wide?: boolean 
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="referrer" content="no-referrer">
 <meta name="robots" content="noindex">
+<link rel="icon" href="/icon.svg" type="image/svg+xml">
 <title>${escapeHtml(title)}</title>
 <style>${CSS}</style>
 </head>
@@ -62,11 +63,15 @@ export function htmlPage(title: string, body: string, options: { wide?: boolean 
  * `form-action` is deliberately not restricted: after the consent form is posted, the browser
  * follows a redirect to the AI client (claude.ai, chatgpt.com, …), which Chrome would block.
  */
-export function htmlResponse(html: string, init: { status?: number; headers?: Headers } = {}): Response {
+export function htmlResponse(
+  html: string,
+  init: { status?: number; headers?: Headers; /** Allows exactly the inline scripts carrying this nonce. */ scriptNonce?: string } = {},
+): Response {
   const headers = new Headers(init.headers);
   headers.append(
     'Content-Security-Policy',
-    "default-src 'none'; style-src 'unsafe-inline'; img-src 'self' data:; base-uri 'none'; frame-ancestors 'none'",
+    "default-src 'none'; style-src 'unsafe-inline'; img-src 'self' data:; base-uri 'none'; frame-ancestors 'none'" +
+      (init.scriptNonce ? `; script-src 'nonce-${init.scriptNonce}'` : ''),
   );
   headers.set('Content-Type', 'text/html; charset=utf-8');
   if (!headers.has('X-Content-Type-Options')) headers.set('X-Content-Type-Options', 'nosniff');

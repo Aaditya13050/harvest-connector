@@ -23,6 +23,7 @@ export const harvestAuth: ConnectorAuth<HarvestProps> = {
     },
   ],
   echoFields: ['account_id'],
+  readyTip: 'Copy your Harvest personal access token before you click Connect, then paste it here straight away.',
 
   renderFields(values, { showAdvanced }) {
     return `<label for="token">Harvest personal access token</label>

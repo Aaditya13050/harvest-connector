@@ -34,6 +34,8 @@ export interface ConnectorAuth<Props> {
   scopes: ScopeOption[];
   /** Form fields name → value that are safe to echo back after an error (never secrets). */
   echoFields: readonly string[];
+  /** What to have ready before connecting, e.g. "Copy your token first". Shown on the page. */
+  readyTip?: string;
   /** HTML for the credential fields. `values` holds the echoed fields; escape them. */
   renderFields(values: Record<string, string>, options: { showAdvanced: boolean }): string;
   /** Check the submitted credentials upstream. Throw ConnectError for anything the person can fix. */
@@ -59,11 +61,13 @@ export async function handleAuthorize<Props>(
       const authRequest = await oauth.parseAuthRequest(request);
       const details = await oauth.describeConsent(authRequest);
       const consent = await oauth.beginConsent(authRequest);
+      const nonce = newNonce();
       const page = renderConsentPage(connector, details, consent.handle, {
         values: {},
         checkedScopes: defaultScopes(connector),
+        nonce,
       });
-      return htmlResponse(page, { headers: consent.headers });
+      return htmlResponse(page, { headers: consent.headers, scriptNonce: nonce });
     }
 
     if (request.method === 'POST') {
@@ -71,7 +75,13 @@ export async function handleAuthorize<Props>(
       const handle = String(form.get('handle') ?? '');
 
       if (form.get('decision') !== 'approve') {
-        const denied = await oauth.denyConsent(request, handle);
+        let denied;
+        try {
+          denied = await oauth.denyConsent(request, handle);
+        } catch (error) {
+          if (error instanceof AuthorizationError) return expiredPage(connector, error, request);
+          throw error;
+        }
         denied.headers.set('Location', denied.redirectTo);
         return new Response(null, { status: 302, headers: denied.headers });
       }
@@ -88,17 +98,27 @@ export async function handleAuthorize<Props>(
         const details = await oauth.describeConsent(authRequest);
         const values: Record<string, string> = {};
         for (const field of connector.echoFields) values[field] = String(form.get(field) ?? '');
+        const nonce = newNonce();
         const page = renderConsentPage(connector, details, handle, {
           values,
           checkedScopes,
           error: error.message,
           showAdvanced: error.options.showAdvanced ?? false,
+          nonce,
         });
-        return htmlResponse(page, { status: 400 });
+        return htmlResponse(page, { status: 400, scriptNonce: nonce });
       }
 
       const granted = withOfflineAccess(checkedScopes, authRequest);
-      const approved = await oauth.approveConsent(request, handle, { scope: granted });
+      let approved;
+      try {
+        approved = await oauth.approveConsent(request, handle, { scope: granted });
+      } catch (error) {
+        // The library binds each page to the browser with a 10-minute cookie. Once it lapses the
+        // error reads "not started in this browser", which is confusing: say it expired instead.
+        if (error instanceof AuthorizationError) return expiredPage(connector, error, request);
+        throw error;
+      }
       const { redirectTo } = await oauth.completeAuthorization({
         request: approved.request,
         userId: connected.userId,
@@ -134,6 +154,31 @@ export async function handleAuthorize<Props>(
   }
 }
 
+/** Shown when a consent page has lapsed (10 minutes), was already used, or came from another browser. */
+function expiredPage(connector: ConnectorAuth<unknown>, error: AuthorizationError, request: Request): Response {
+  // Diagnostics only: which check failed and which consent cookies arrived (names, never values).
+  const cookieNames = (request.headers.get('Cookie') ?? '')
+    .split(';')
+    .map((part) => part.trim().split('=')[0])
+    .filter((name) => name?.startsWith('__Host-oauth-'));
+  console.warn(
+    `[consent] rejected: ${error.description} | consent cookies sent: ${cookieNames.length ? cookieNames.join(', ') : 'none'} | sec-fetch-site: ${request.headers.get('Sec-Fetch-Site') ?? '-'}`,
+  );
+  const product = escapeHtml(connector.productName);
+  return htmlResponse(
+    htmlPage(
+      'This page has expired',
+      `<h1>This connect page has expired</h1>
+<div class="alert warn" role="alert">Connect pages work for 10 minutes, and this one has expired or was already used.</div>
+<p><strong>Clicked Connect twice?</strong> The first click has probably already connected you. Check the app's connector settings.</p>
+<p>Otherwise, go back to the app you were connecting from and click <strong>Connect</strong> again.</p>
+${connector.readyTip ? `<p class="muted">Tip: ${escapeHtml(connector.readyTip)}</p>` : ''}
+<p class="fine">Nothing was changed in your ${product} account.</p>`,
+    ),
+    { status: 400 },
+  );
+}
+
 function defaultScopes(connector: ConnectorAuth<unknown>): string[] {
   return connector.scopes.filter((s) => s.required || s.defaultChecked).map((s) => s.scope);
 }
@@ -153,7 +198,7 @@ function renderConsentPage(
   connector: ConnectorAuth<unknown>,
   details: ConsentDescription,
   handle: string,
-  state: { values: Record<string, string>; checkedScopes: string[]; error?: string; showAdvanced?: boolean },
+  state: { values: Record<string, string>; checkedScopes: string[]; error?: string; showAdvanced?: boolean; nonce: string },
 ): string {
   const product = escapeHtml(connector.productName);
   const client = escapeHtml(details.clientName);
@@ -182,6 +227,7 @@ Only continue if you just started connecting from it.</div>`
 <p>After you connect, access will be sent to <strong>${escapeHtml(details.redirectHost)}</strong>.</p>
 ${loopbackWarning}
 ${error}
+<p class="hint">This page works for 10 minutes.${connector.readyTip ? ` ${escapeHtml(connector.readyTip)}` : ''}</p>
 <form method="post" autocomplete="off">
 <input type="hidden" name="handle" value="${escapeHtml(handle)}">
 ${connector.renderFields(state.values, { showAdvanced: state.showAdvanced ?? false })}
@@ -195,6 +241,29 @@ ${scopes}
 </div>
 </form>
 <p class="fine">You can disconnect at any time from the app's connector settings, or by deleting the token in ${product}.
-<a href="/privacy">Privacy policy</a></p>`,
+<a href="/privacy">Privacy policy</a></p>
+<script nonce="${escapeHtml(state.nonce)}">${SUBMIT_ONCE_SCRIPT}</script>`,
   );
+}
+
+/**
+ * Connecting checks the credentials upstream, which takes a few seconds. Without feedback people
+ * click again, and the second post finds the one-time page already used. Show progress and ignore
+ * repeat submits (without disabling the button, which would drop its value from the form).
+ */
+const SUBMIT_ONCE_SCRIPT = `(function () {
+  var form = document.querySelector('form');
+  if (!form) return;
+  form.addEventListener('submit', function (event) {
+    if (form.dataset.sent) { event.preventDefault(); return; }
+    form.dataset.sent = '1';
+    form.setAttribute('aria-busy', 'true');
+    var button = event.submitter;
+    if (button && button.value === 'approve') button.textContent = 'Connecting\\u2026';
+  });
+  window.addEventListener('pageshow', function () { delete form.dataset.sent; form.removeAttribute('aria-busy'); });
+})();`;
+
+function newNonce(): string {
+  return crypto.randomUUID().replaceAll('-', '');
 }
